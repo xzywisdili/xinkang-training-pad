@@ -1,0 +1,25 @@
+# JavaScript build and local dependencies
+node_modules/
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# Local environment settings and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE / OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Android build output and machine-specific configuration
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab
