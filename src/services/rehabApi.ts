@@ -88,7 +88,8 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), { ...init, headers, cache: "no-store" });
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { detail?: string; message?: string };
-    throw new Error(body.detail || body.message || `后端请求失败（${response.status}）`);
+    const message = body.detail || body.message;
+    throw new Error(message ? `${message}（${response.status}）` : `后端请求失败（${response.status}）`);
   }
   return response.json() as Promise<T>;
 }
@@ -127,7 +128,7 @@ export async function getLatestSignedPrescription(patientUserId: string) {
       .filter((item) => item.status === "completed" && Boolean(item.signed_at || item.signed_by))
       .sort((left, right) => String(right.signed_at || right.valid_from || "").localeCompare(String(left.signed_at || left.valid_from || "")))[0] ?? null;
   } catch (error) {
-    if (error instanceof Error && /401|403|Not authenticated|credentials/i.test(error.message)) return null;
+    if (error instanceof Error && /401|403|404|Not authenticated|credentials|未登录|token\s*缺失|无有效\s*token/i.test(error.message)) return null;
     throw error;
   }
 }

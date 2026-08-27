@@ -664,7 +664,6 @@ function PatientHeader({ view, onExit }: { view: View; onExit: () => void }) {
         <div><p className="text-lg font-bold text-slate-950">心康伴侣</p><p className="text-xs text-slate-500">院内训练 Pad · {title}</p></div>
       </div>
       <div className="flex items-center gap-3">
-        <span className="rounded-full bg-medical-50 px-3 py-1.5 text-xs font-bold text-medical-700">{patient.name} · {patient.code}</span>
         <span className="flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600"><Wifi className="h-4 w-4 text-medical-600" /> 院内网络</span>
         <button type="button" onClick={onExit} className="patient-touch flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-slate-600"><ArrowLeft className="h-4 w-4" /> 退出</button>
       </div>
@@ -856,45 +855,27 @@ function PrescriptionScreen(props: {
 }) {
   const { exercise, trainingType, targetHr, warmup, mainMinutes, cooldown, repeats, totalMinutes, onBack, onContinue, cloudPrescription } = props;
   const prescription = activePrescription;
-  const prescriptionAdvice = prescription.advice;
   return (
-    <section className="grid h-full min-h-[570px] grid-cols-[0.9fr_1.1fr] gap-4" data-testid="page-VIEW-PATIENT-PRESCRIPTION">
-      <article className="rounded-3xl border border-white bg-white p-6 shadow-card">
-        <p className="text-xs font-bold text-medical-600">医生处方 · 护士核对</p><h1 className="mt-2 text-2xl font-bold text-slate-950">今日功率车训练参数</h1><p className="mt-2 text-sm leading-6 text-slate-500">默认读取医生已审核并签署的处方。患者端仅查看、核对和确认。</p>
-        <div className="mt-6 rounded-2xl bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-6 text-white">
-          <p className="text-sm text-teal-100">今日目标</p><div className="mt-3 flex items-end gap-2"><span className="text-6xl font-bold">{targetHr}</span><span className="pb-2 text-lg text-teal-100">bpm</span></div><p className="mt-2 text-sm text-teal-50/75">建议控制区间 {targetHr - 8}–{targetHr + 8} bpm</p>
-          <div className="mt-6 grid grid-cols-3 gap-2">{[["热身", warmup], ["训练", mainMinutes * repeats], ["放松", cooldown]].map(([label, value]) => <div className="rounded-xl bg-white/10 p-3" key={label}><p className="text-xs text-teal-100">{label}</p><p className="mt-1 text-xl font-bold">{value} 分</p></div>)}</div>
-          <div className="mt-4 flex items-center justify-between border-t border-white/15 pt-4"><span className="text-sm text-teal-100">总计时间</span><span className="text-2xl font-bold">{totalMinutes} 分钟</span></div>
+    <section className="mx-auto flex h-full min-h-[570px] max-w-5xl items-center" data-testid="page-VIEW-PATIENT-PRESCRIPTION">
+      <article className="w-full rounded-3xl border border-white bg-white p-7 shadow-card">
+        <div className="flex items-start justify-between gap-6">
+          <div><p className="text-xs font-bold text-medical-600">训练处方确认</p><h1 className="mt-2 text-2xl font-bold text-slate-950">今日功率车训练</h1><p className="mt-2 text-sm text-slate-500">核对本次训练的核心参数后进入设备检查。</p></div>
+          <span className={`rounded-full px-4 py-2 text-xs font-bold ${cloudPrescription ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>{cloudPrescription ? "云端处方已签署" : "设备联调模式"}</span>
         </div>
-        {cloudPrescription
-          ? <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800"><ShieldCheck className="mr-2 inline h-5 w-5" />云端处方 {cloudPrescription.prescription_code || cloudPrescription.id} · {cloudPrescription.doctor_full_name || cloudPrescription.signed_by || "医生"}已签署</div>
-          : <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold leading-6 text-amber-900"><AlertTriangle className="mr-2 inline h-5 w-5" />云端未返回已签署处方，当前参数仅用于设备联调。正式训练前必须由同事后端开放 Pad 处方读取，并校验有效期。</div>}
-        <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50 p-4">
-          <p className="text-sm font-bold text-amber-900">医生写给您的注意事项</p>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-xs leading-5 text-amber-900">
-            <PatientAdvice label="康复忌讳" value={prescriptionAdvice.rehabContraindications} />
-            <PatientAdvice label="吃饭注意" value={prescriptionAdvice.dietCautions} />
-            <PatientAdvice label="运动注意" value={prescriptionAdvice.exerciseCautions} />
-            <PatientAdvice label="何时停止" value={prescriptionAdvice.stopConditions} />
-            <PatientAdvice label="用药提醒" value={prescriptionAdvice.medicationAdvice} />
-            <PatientAdvice label="医生说明" value={prescriptionAdvice.patientInstruction} />
-          </div>
-        </div>
-      </article>
-      <article className="flex flex-col rounded-3xl border border-white bg-white p-6 shadow-card">
-        <div className="flex items-center justify-between"><h2 className="text-lg font-bold text-slate-950">护士核对项目</h2><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">只读确认</span></div>
-        <div className="mt-5 grid grid-cols-2 gap-4">
+        <div className="mt-7 grid grid-cols-4 gap-4">
           <ReadOnlyPrescriptionItem label="训练方式" value={exercise === "bike" ? prescription.exerciseProject : "视频跟练"} />
           <ReadOnlyPrescriptionItem label="训练模式" value={trainingType === "continuous" ? "连续训练" : "间歇训练"} />
-          <ReadOnlyPrescriptionItem label="靶心率区间" value={`${prescription.targetHr[0]}–${prescription.targetHr[1]} bpm`} />
+          <ReadOnlyPrescriptionItem label="靶心率" value={`${targetHr - 8}–${targetHr + 8} bpm`} />
           <ReadOnlyPrescriptionItem label="目标功率" value={`${prescription.targetPower[0]}–${prescription.targetPower[1]} W`} />
-          <ReadOnlyPrescriptionItem label="热身时间" value={`${warmup} 分钟`} />
-          <ReadOnlyPrescriptionItem label="主要训练" value={`${mainMinutes * repeats} 分钟`} />
-          <ReadOnlyPrescriptionItem label="放松时间" value={`${cooldown} 分钟`} />
-          <div className="rounded-2xl border border-medical-100 bg-medical-50 p-4"><p className="text-xs font-bold text-medical-700">自动计算总时长</p><p className="mt-2 text-3xl font-bold text-medical-900">{totalMinutes}<span className="ml-1 text-sm">分钟</span></p></div>
         </div>
-        <div className="mt-5 rounded-2xl border border-blue-100 bg-blue-50 p-4 text-xs font-bold leading-5 text-blue-800">护士仅核对患者身份、处方版本和设备连接；处方参数如需调整，应返回医生端生成新版本并签署。</div>
-        <div className="mt-auto flex justify-between pt-5"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回首页</button><button type="button" onClick={onContinue} className="btn-primary patient-touch px-7">确认处方，检查设备 <ArrowRight className="h-5 w-5" /></button></div>
+        <div className="mt-4 grid grid-cols-[1fr_1fr_1fr_1.25fr] gap-3 rounded-2xl bg-gradient-to-r from-[#123d54] to-[#1f7e79] p-4 text-white">
+          {[["热身", `${warmup} 分钟`], ["主训练", `${mainMinutes * repeats} 分钟`], ["放松", `${cooldown} 分钟`], ["总时长", `${totalMinutes} 分钟`]].map(([label, value]) => <div className="rounded-xl bg-white/10 px-4 py-3" key={label}><p className="text-xs text-teal-100">{label}</p><p className="mt-1 text-xl font-bold">{value}</p></div>)}
+        </div>
+        {cloudPrescription
+          ? <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800"><ShieldCheck className="mr-2 inline h-5 w-5" />处方 {cloudPrescription.prescription_code || cloudPrescription.id} 已由 {cloudPrescription.doctor_full_name || cloudPrescription.signed_by || "医生"} 签署。</div>
+          : <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900"><AlertTriangle className="mr-2 inline h-5 w-5" />后端尚未提供 Pad 处方 token，以上参数仅用于功率车联调，不作为正式临床处方。</div>}
+        <div className="mt-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-800"><b>停止条件：</b>{prescription.advice.stopConditions}</div>
+        <div className="mt-6 flex justify-between"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回</button><button type="button" onClick={onContinue} className="btn-primary patient-touch px-7">确认并检查设备 <ArrowRight className="h-5 w-5" /></button></div>
       </article>
     </section>
   );
@@ -923,7 +904,7 @@ function DeviceScreen({ backpack, bike, onBackpack, onReset, onBack, onContinue,
       <div className="flex items-start justify-between"><div><p className="text-xs font-bold text-medical-600">训练前准备 · 第 1 项</p><h1 className="mt-2 text-2xl font-bold text-slate-950">连接背包与功率车</h1><p className="mt-2 text-sm text-slate-500">两个设备均连接通过后，才能进入下一步。</p></div><span className={`rounded-full px-4 py-2 text-xs font-bold ${allReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{allReady ? "设备已就绪" : `已连接 ${Number(backpack) + Number(bike)} / 2`}</span></div>
       <div className="mt-8 grid flex-1 grid-cols-2 gap-5">
         <DeviceCard icon={Bluetooth} title="智能监测背包" code="CARDIO-BAG-08" details={["心率传感器", "血氧传感器", "血压模块"]} connected={backpack} onConnect={onBackpack} />
-        <DeviceCard icon={Bike} title="功率车模拟器" code="bike-sim-001" details={["速度 / 距离", "功率 / 阻力", "踏频数据"]} connected={bike} onConnect={() => undefined} waitingLabel={realtimeStatus === "connected" ? "请在模拟器点击开始" : "正在连接后端"} />
+        <DeviceCard icon={Bike} title="功率车模拟器" code="bike-sim-001" details={["速度 / 距离", "功率 / 阻力", "心率 / 血氧"]} connected={bike} onConnect={() => undefined} waitingLabel={realtimeStatus === "connected" ? "请在模拟器点击开始" : "正在连接后端"} />
       </div>
       <div className={`mt-5 rounded-2xl border p-4 text-sm ${realtimeStatus === "error" ? "border-red-100 bg-red-50 text-red-800" : "border-sky-100 bg-sky-50 text-sky-800"}`}><Wifi className="mr-2 inline h-5 w-5" />{realtimeMessage}</div>
       <div className="mt-6 flex justify-between"><div className="flex gap-3"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回处方</button><button type="button" onClick={onReset} className="btn-secondary patient-touch"><RotateCcw className="h-4 w-4" /> 重新检测</button></div><button type="button" disabled={!allReady} onClick={onContinue} className="btn-primary patient-touch px-8">设备通过，进行心理准备 <ArrowRight className="h-5 w-5" /></button></div>
