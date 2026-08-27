@@ -1,6 +1,6 @@
 # 心康伴侣训练端 Pad（Android）
 
-从 `xinkang-companion-clinical-demo` 拆出的独立训练端工程。它保留院内训练所需的身份确认/建档、运动选择、处方核对、设备检查、心理评估、血压模式、功率车训练、视频跟练和训练结果；不含医生 Web、医护账号、权限后台、视频资源管理，以及患者小程序应承载的日历、报告和个人档案入口。
+以新版 `xinkang-companion-rehab-closed-loop-demo-main` 的患者训练 UI 和闭环思路为产品基线，面向院内 Android Pad 独立交付。Pad 负责患者核验、处方核对、设备检查、训练监测、患者反馈和单次训练报告；医护 Web 继续负责患者建档、处方签署、异常复核和报告管理。
 
 ## MacBook 浏览器调试
 
@@ -32,6 +32,20 @@ Android Debug 构建还需要 Android Studio 自带的 JDK、Android SDK 与对�
 - Kotlin 原生插件：BLE 设备连接、采样、断连重连、原生 TTS/提示音、后台任务、设备时间同步和安全日志。
 - 后端接口：认证、患者/处方/视频读取、训练会话、指标批量上传、异常事件、报告与离线补传。
 
+当前联调数据链：
+
+```text
+骑行功率车模拟器 (:3000)
+  → 功率车适配器 (:4000)
+  → FastAPI / 云 PostgreSQL (:8000)
+  → /ws/watch/{patient_user_id}
+  → Android Pad 实时训练界面
+```
+
+病案号使用患者短号，例如 `1006`；Pad 核验后转换为云库完整 `user_id`，例如 `10001_1006`。训练历史和单次报告读取同事后端的 `/api/exercises/{patient_user_id}` 与 `/api/exercises/{patient_user_id}/{record_id}`，与 Web 报告管理共用同一数据源。
+
+配置见 `.env.example`。开发服务器默认使用 `http://123.57.205.29:8000`；生产必须改为 HTTPS/WSS，并由后端提供 Pad/患者专用鉴权。
+
 `src/native/trainingDevice.ts` 已定义 React 侧设备桥接契约；接入设备时保持该接口不变，再在 Android 工程实现同名 Capacitor Kotlin Plugin。
 
 ## 病例号 / 病案号 OCR 接入
@@ -48,5 +62,5 @@ Content-Type: multipart/form-data
 
 ## 当前状态
 
-本工程当前使用脱敏初始数据和预览设备状态。它可以直接用于 Web UI 调试；真实接口与 Android 原生设备插件需要在后续联调阶段接入。
+患者核验、功率车实时数据、训练历史和单次训练报告已对接共用 FastAPI/云库。真实 BLE 功率车和监测背包仍需在 Android 原生插件中实现。当前后端尚未给 Pad 开放患者鉴权及已签处方读取权限，因此处方缺失时界面只允许作为设备联调状态使用，不应作为正式临床训练依据。
 # xinkang-training-pad

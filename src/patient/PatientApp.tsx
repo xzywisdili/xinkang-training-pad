@@ -54,6 +54,19 @@ import { stageReportData, summarizeVersion } from "./stageReportData";
 import type { PrescriptionVersion, VersionSummary } from "./stageReportData";
 import { clinicalSnapshotChen, getPrescriptionVersionDetail, getSingleTrainingReportDetail, patientMasterChen, singleTrainingReportDetails } from "../clinicalSharedData";
 import { recognizeMedicalRecord } from "../services/medicalRecordOcr";
+import {
+  findPatientByRecordNumber,
+  getExerciseReport,
+  getLatestSignedPrescription,
+  listPatientExercises,
+  subscribeBikeRealtime,
+  type BikeMetric,
+  type ExerciseRecord,
+  type ExerciseRecordDetail,
+  type ExerciseReport,
+  type RehabPatient,
+  type RehabPrescription
+} from "../services/rehabApi";
 
 type PatientAppProps = {
   onExit: () => void;
@@ -161,6 +174,13 @@ export function PatientApp({
   const [measuredBp, setMeasuredBp] = useState("126 / 78");
   const [measuredBpTime, setMeasuredBpTime] = useState("09:18");
   const [reportToOpen, setReportToOpen] = useState<string | null>(null);
+  const [activePatient, setActivePatient] = useState<RehabPatient | null>(null);
+  const [cloudPrescription, setCloudPrescription] = useState<RehabPrescription | null>(null);
+  const [exerciseRecords, setExerciseRecords] = useState<ExerciseRecord[]>([]);
+  const [selectedCloudReport, setSelectedCloudReport] = useState<ExerciseReport | null>(null);
+  const [liveMetric, setLiveMetric] = useState<BikeMetric | null>(null);
+  const [realtimeStatus, setRealtimeStatus] = useState<"offline" | "connected" | "receiving" | "ended" | "error">("offline");
+  const [realtimeMessage, setRealtimeMessage] = useState("尚未连接实时数据通道");
   const selectedTrainingVideo = publishedTrainingVideos.find((video) => video.subtype === exerciseVideoSubtypes[exercise]) ?? null;
 
   const totalMinutes = warmup + mainMinutes * repeats + cooldown;
@@ -171,6 +191,55 @@ export function PatientApp({
   }, [view, paused, trainingState]);
 
   useEffect(() => () => stopAudioGuidance(), []);
+
+  useEffect(() => {
+    if (!activePatient) return;
+    return subscribeBikeRealtime(activePatient.user_id, (event) => {
+      if (event.type === "connected") {
+        setRealtimeStatus("connected");
+        setRealtimeMessage("已连接后端，等待功率车发送数据");
+        return;
+      }
+      if (event.type === "error") {
+        setRealtimeStatus("error");
+        setRealtimeMessage(event.message || "实时数据通道异常");
+        return;
+      }
+      if (event.metric) setLiveMetric(event.metric);
+      if (event.type === "start" || event.type === "sample") {
+        setRealtimeStatus("receiving");
+        setRealtimeMessage(`正在接收功率车数据${event.metric?.record_id ? ` · ${event.metric.record_id}` : ""}`);
+        setBikeConnected(true);
+      }
+      if (event.type === "end") {
+        setRealtimeStatus("ended");
+        setRealtimeMessage("功率车训练数据已结束并写入云端");
+        void refreshExerciseRecords(activePatient.user_id);
+      }
+    });
+  }, [activePatient?.user_id]);
+
+  async function refreshExerciseRecords(patientUserId: string) {
+    const records = await listPatientExercises(patientUserId);
+    setExerciseRecords([...records].sort((left, right) => String(right.start_time || "").localeCompare(String(left.start_time || ""))));
+  }
+
+  async function registerPatient(recordNumber: string) {
+    const patientRecord = await findPatientByRecordNumber(recordNumber);
+    setActivePatient(patientRecord);
+    const [records, prescription] = await Promise.all([
+      listPatientExercises(patientRecord.user_id),
+      getLatestSignedPrescription(patientRecord.user_id)
+    ]);
+    setExerciseRecords([...records].sort((left, right) => String(right.start_time || "").localeCompare(String(left.start_time || ""))));
+    setCloudPrescription(prescription);
+    setView("workbench");
+  }
+
+  async function openCloudReport(recordId: string) {
+    if (!activePatient) return;
+    setSelectedCloudReport(await getExerciseReport(activePatient.user_id, recordId));
+  }
 
   function startTraining() {
     setPhase("warmup");
@@ -199,6 +268,7 @@ export function PatientApp({
     stopAudioGuidance();
     setTrainingState("completed");
     setView("result");
+    if (activePatient) void refreshExerciseRecords(activePatient.user_id);
   }
 
   function resetSession() {
@@ -216,7 +286,7 @@ export function PatientApp({
     setView("workbench");
   }
 
-  if (view === "intake") return <IntakeScreen onExit={onExit} onContinue={() => setView("workbench")} />;
+  if (view === "intake") return <IntakeScreen onExit={onExit} onContinue={registerPatient} />;
 
   const mainView = view === "home" || view === "calendar" || view === "report" || view === "profile";
 
@@ -239,7 +309,7 @@ export function PatientApp({
           {flow.some(([key]) => key === view) && <FlowBar view={view} />}
 
           <div className="min-h-0 flex-1 py-3">
-          {view === "workbench" && <TrainingWorkbench onStart={() => setView("trainingProject")} onHistory={() => setView("report")} />}
+          {view === "workbench" && <TrainingWorkbench patient={activePatient} realtimeStatus={realtimeStatus} onStart={() => setView("trainingProject")} onHistory={() => setView("report")} />}
           {view === "trainingProject" && <TrainingProjectScreen onBack={() => setView("workbench")} onChooseBike={() => { setExercise("bike"); setView("prescription"); }} />}
           {view === "home" && (
             <HomeScreen
@@ -250,7 +320,17 @@ export function PatientApp({
             />
           )}
           {view === "calendar" && <CalendarScreen onBack={() => setView("home")} />}
-          {view === "report" && <ReportScreen onStart={() => setView("prescription")} initialSingleReportId={reportToOpen} />}
+          {view === "report" && activePatient && (
+            <CloudReportScreen
+              patient={activePatient}
+              records={exerciseRecords}
+              selectedReport={selectedCloudReport}
+              onRefresh={() => refreshExerciseRecords(activePatient.user_id)}
+              onSelect={openCloudReport}
+              onClear={() => setSelectedCloudReport(null)}
+              onStart={() => setView("prescription")}
+            />
+          )}
           {view === "profile" && <ProfileScreen onBack={() => setView("home")} />}
           {view === "prescription" && (
             <PrescriptionScreen
@@ -264,6 +344,7 @@ export function PatientApp({
               totalMinutes={totalMinutes}
               onBack={() => setView("home")}
               onContinue={() => setView("devices")}
+              cloudPrescription={cloudPrescription}
             />
           )}
           {view === "devices" && (
@@ -271,13 +352,14 @@ export function PatientApp({
               backpack={backpack}
               bike={bikeConnected}
               onBackpack={() => setBackpack(true)}
-              onBike={() => setBikeConnected(true)}
               onReset={() => {
                 setBackpack(false);
                 setBikeConnected(false);
               }}
               onBack={() => setView("prescription")}
               onContinue={() => setView("psych")}
+              realtimeStatus={realtimeStatus}
+              realtimeMessage={realtimeMessage}
             />
           )}
           {view === "psych" && (
@@ -324,6 +406,9 @@ export function PatientApp({
               anomaly={anomaly}
               setAnomaly={changeAnomaly}
               onFinish={finishTraining}
+              liveMetric={liveMetric}
+              realtimeStatus={realtimeStatus}
+              realtimeMessage={realtimeMessage}
             />
           )}
           {view === "videoTraining" && selectedTrainingVideo && <VideoTrainingScreen video={selectedTrainingVideo} onBack={() => setView("home")} onFinish={() => setView("home")} />}
@@ -334,6 +419,8 @@ export function PatientApp({
               rpe={rpe}
               bp={measuredBp}
               onDone={resetSession}
+              record={exerciseRecords[0]}
+              metric={liveMetric}
             />
           )}
           </div>
@@ -439,11 +526,12 @@ function RecordScreen({ onBack, onSaved }: { onBack: () => void; onSaved: () => 
   );
 }
 
-function IntakeScreen({ onExit, onContinue }: { onExit: () => void; onContinue: () => void }) {
+function IntakeScreen({ onExit, onContinue }: { onExit: () => void; onContinue: (recordNumber: string) => Promise<void> }) {
   const [mode, setMode] = useState<"manual" | "scan">("manual");
   const [recordNumber, setRecordNumber] = useState("");
   const [scanFile, setScanFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [message, setMessage] = useState("");
 
   async function handleRecognition() {
@@ -463,6 +551,18 @@ function IntakeScreen({ onExit, onContinue }: { onExit: () => void; onContinue: 
     }
   }
 
+  async function handleContinue() {
+    setChecking(true);
+    setMessage("正在云端患者库核对病案号…");
+    try {
+      await onContinue(recordNumber);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "患者核验失败，请稍后重试");
+    } finally {
+      setChecking(false);
+    }
+  }
+
   return (
     <main className="ipad-stage flex min-h-screen items-center justify-center p-6" data-testid="page-VIEW-TRAINING-INTAKE">
       <section className="w-full max-w-[980px] overflow-hidden rounded-[32px] bg-white shadow-float">
@@ -477,16 +577,16 @@ function IntakeScreen({ onExit, onContinue }: { onExit: () => void; onContinue: 
             <label className="block"><span className="text-sm font-bold text-slate-700">病例号 / 病案号</span><input autoFocus value={recordNumber} onChange={(event) => setRecordNumber(event.target.value)} placeholder="请输入或核对识别结果" className="mt-2 h-14 w-full rounded-2xl border border-slate-200 bg-white px-4 text-lg font-bold text-slate-900 outline-none focus:border-medical-500 focus:ring-4 focus:ring-medical-50" /></label>
             {message && <p className="mt-3 text-sm font-semibold text-medical-800">{message}</p>}
           </div>
-          <div className="mt-7 flex justify-between"><button type="button" onClick={onExit} className="btn-secondary patient-touch">返回</button><button type="button" disabled={!recordNumber.trim()} onClick={onContinue} className="btn-primary patient-touch px-8">确认并进入 <ArrowRight className="h-5 w-5" /></button></div>
+          <div className="mt-7 flex justify-between"><button type="button" onClick={onExit} className="btn-secondary patient-touch">返回</button><button type="button" disabled={!recordNumber.trim() || checking} onClick={handleContinue} className="btn-primary patient-touch px-8">{checking ? "正在核验…" : "核验并进入"} <ArrowRight className="h-5 w-5" /></button></div>
         </div>
       </section>
     </main>
   );
 }
 
-function TrainingWorkbench({ onStart, onHistory }: { onStart: () => void; onHistory: () => void }) {
+function TrainingWorkbench({ patient, realtimeStatus, onStart, onHistory }: { patient: RehabPatient | null; realtimeStatus: string; onStart: () => void; onHistory: () => void }) {
   return <section className="mx-auto grid min-h-[610px] max-w-5xl grid-cols-2 gap-6 py-7" data-testid="page-VIEW-TRAINING-WORKBENCH">
-    <button type="button" onClick={onStart} className="group flex flex-col justify-between rounded-[32px] bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-9 text-left text-white shadow-xl transition hover:-translate-y-1"><span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/15"><Play className="h-8 w-8 fill-current" /></span><div><p className="text-sm font-bold text-teal-100">今日训练</p><h1 className="mt-2 text-4xl font-bold">开始训练</h1><p className="mt-4 max-w-sm text-sm leading-6 text-teal-50/80">核对处方、连接设备并完成本次康复训练。</p></div><span className="mt-10 flex items-center gap-2 text-sm font-bold">进入训练 <ArrowRight className="h-5 w-5" /></span></button>
+    <button type="button" onClick={onStart} className="group flex flex-col justify-between rounded-[32px] bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-9 text-left text-white shadow-xl transition hover:-translate-y-1"><span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/15"><Play className="h-8 w-8 fill-current" /></span><div><p className="text-sm font-bold text-teal-100">{patient?.full_name || "已核验患者"} · {patient?.patient_id || "—"}</p><h1 className="mt-2 text-4xl font-bold">开始训练</h1><p className="mt-4 max-w-sm text-sm leading-6 text-teal-50/80">核对处方、连接设备并完成本次康复训练。</p><p className="mt-3 text-xs font-bold text-teal-100">实时通道：{realtimeStatus === "receiving" ? "正在接收数据" : realtimeStatus === "connected" ? "已连接，等待设备" : "连接检查中"}</p></div><span className="mt-10 flex items-center gap-2 text-sm font-bold">进入训练 <ArrowRight className="h-5 w-5" /></span></button>
     <button type="button" onClick={onHistory} className="group flex flex-col justify-between rounded-[32px] border border-medical-100 bg-white p-9 text-left shadow-card transition hover:-translate-y-1 hover:border-medical-300"><span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-medical-50 text-medical-700"><TrendingUp className="h-8 w-8" /></span><div><p className="text-sm font-bold text-medical-700">训练回顾</p><h1 className="mt-2 text-4xl font-bold text-slate-950">训练历史</h1><p className="mt-4 max-w-sm text-sm leading-6 text-slate-500">查看历次训练趋势、完成情况与详细记录。</p></div><span className="mt-10 flex items-center gap-2 text-sm font-bold text-medical-700">查看历史 <ArrowRight className="h-5 w-5" /></span></button>
   </section>;
 }
@@ -752,8 +852,9 @@ function PrescriptionScreen(props: {
   exercise: Exercise; trainingType: TrainingType; targetHr: number;
   warmup: number; mainMinutes: number; cooldown: number;
   repeats: number; totalMinutes: number; onBack: () => void; onContinue: () => void;
+  cloudPrescription: RehabPrescription | null;
 }) {
-  const { exercise, trainingType, targetHr, warmup, mainMinutes, cooldown, repeats, totalMinutes, onBack, onContinue } = props;
+  const { exercise, trainingType, targetHr, warmup, mainMinutes, cooldown, repeats, totalMinutes, onBack, onContinue, cloudPrescription } = props;
   const prescription = activePrescription;
   const prescriptionAdvice = prescription.advice;
   return (
@@ -765,7 +866,9 @@ function PrescriptionScreen(props: {
           <div className="mt-6 grid grid-cols-3 gap-2">{[["热身", warmup], ["训练", mainMinutes * repeats], ["放松", cooldown]].map(([label, value]) => <div className="rounded-xl bg-white/10 p-3" key={label}><p className="text-xs text-teal-100">{label}</p><p className="mt-1 text-xl font-bold">{value} 分</p></div>)}</div>
           <div className="mt-4 flex items-center justify-between border-t border-white/15 pt-4"><span className="text-sm text-teal-100">总计时间</span><span className="text-2xl font-bold">{totalMinutes} 分钟</span></div>
         </div>
-        <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800"><ShieldCheck className="mr-2 inline h-5 w-5" />处方版本 {prescription.version} · {prescription.physician}已审核签署</div>
+        {cloudPrescription
+          ? <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800"><ShieldCheck className="mr-2 inline h-5 w-5" />云端处方 {cloudPrescription.prescription_code || cloudPrescription.id} · {cloudPrescription.doctor_full_name || cloudPrescription.signed_by || "医生"}已签署</div>
+          : <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold leading-6 text-amber-900"><AlertTriangle className="mr-2 inline h-5 w-5" />云端未返回已签署处方，当前参数仅用于设备联调。正式训练前必须由同事后端开放 Pad 处方读取，并校验有效期。</div>}
         <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50 p-4">
           <p className="text-sm font-bold text-amber-900">医生写给您的注意事项</p>
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs leading-5 text-amber-900">
@@ -813,23 +916,23 @@ function SelectMinutes({ label, value, options, onChange }: { label: string; val
   return <label className="rounded-2xl border border-slate-200 p-4"><span className="text-xs font-bold text-slate-500">{label}</span><select value={value} onChange={(event) => onChange(Number(event.target.value))} className="mt-3 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 font-bold text-slate-800 outline-none">{options.map((option) => <option key={option} value={option}>{option} 分钟</option>)}</select></label>;
 }
 
-function DeviceScreen({ backpack, bike, onBackpack, onBike, onReset, onBack, onContinue }: { backpack: boolean; bike: boolean; onBackpack: () => void; onBike: () => void; onReset: () => void; onBack: () => void; onContinue: () => void }) {
+function DeviceScreen({ backpack, bike, onBackpack, onReset, onBack, onContinue, realtimeStatus, realtimeMessage }: { backpack: boolean; bike: boolean; onBackpack: () => void; onReset: () => void; onBack: () => void; onContinue: () => void; realtimeStatus: string; realtimeMessage: string }) {
   const allReady = backpack && bike;
   return (
     <section className="flex h-full min-h-[560px] flex-col rounded-3xl border border-white bg-white p-7 shadow-card" data-testid="page-VIEW-PATIENT-DEVICES">
       <div className="flex items-start justify-between"><div><p className="text-xs font-bold text-medical-600">训练前准备 · 第 1 项</p><h1 className="mt-2 text-2xl font-bold text-slate-950">连接背包与功率车</h1><p className="mt-2 text-sm text-slate-500">两个设备均连接通过后，才能进入下一步。</p></div><span className={`rounded-full px-4 py-2 text-xs font-bold ${allReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{allReady ? "设备已就绪" : `已连接 ${Number(backpack) + Number(bike)} / 2`}</span></div>
       <div className="mt-8 grid flex-1 grid-cols-2 gap-5">
         <DeviceCard icon={Bluetooth} title="智能监测背包" code="CARDIO-BAG-08" details={["心率传感器", "血氧传感器", "血压模块"]} connected={backpack} onConnect={onBackpack} />
-        <DeviceCard icon={Bike} title="功率车" code="BIKE-REHAB-03" details={["速度 / 距离", "功率 / 阻力", "踏频数据"]} connected={bike} onConnect={onBike} />
+        <DeviceCard icon={Bike} title="功率车模拟器" code="bike-sim-001" details={["速度 / 距离", "功率 / 阻力", "踏频数据"]} connected={bike} onConnect={() => undefined} waitingLabel={realtimeStatus === "connected" ? "请在模拟器点击开始" : "正在连接后端"} />
       </div>
-      <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-4 text-sm text-sky-800"><Bluetooth className="mr-2 inline h-5 w-5" />请确认监测背包和功率车连接稳定后开始训练。</div>
+      <div className={`mt-5 rounded-2xl border p-4 text-sm ${realtimeStatus === "error" ? "border-red-100 bg-red-50 text-red-800" : "border-sky-100 bg-sky-50 text-sky-800"}`}><Wifi className="mr-2 inline h-5 w-5" />{realtimeMessage}</div>
       <div className="mt-6 flex justify-between"><div className="flex gap-3"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回处方</button><button type="button" onClick={onReset} className="btn-secondary patient-touch"><RotateCcw className="h-4 w-4" /> 重新检测</button></div><button type="button" disabled={!allReady} onClick={onContinue} className="btn-primary patient-touch px-8">设备通过，进行心理准备 <ArrowRight className="h-5 w-5" /></button></div>
     </section>
   );
 }
 
-function DeviceCard({ icon: Icon, title, code, details, connected, onConnect }: { icon: typeof Bluetooth; title: string; code: string; details: string[]; connected: boolean; onConnect: () => void }) {
-  return <article className={`flex flex-col rounded-3xl border p-6 ${connected ? "border-emerald-300 bg-emerald-50/60" : "border-slate-200 bg-slate-50"}`}><div className="flex items-start justify-between"><span className={`flex h-14 w-14 items-center justify-center rounded-2xl ${connected ? "bg-emerald-600 text-white" : "bg-white text-slate-500"}`}><Icon className="h-7 w-7" /></span><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${connected ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{connected ? "已连接" : "等待连接"}</span></div><h2 className="mt-5 text-xl font-bold text-slate-950">{title}</h2><p className="mt-1 text-xs font-semibold text-slate-400">{code}</p><div className="mt-5 grid grid-cols-3 gap-2">{details.map((item) => <span key={item} className={`rounded-xl px-2 py-3 text-center text-xs font-bold ${connected ? "bg-white text-emerald-700" : "bg-white text-slate-500"}`}>{connected && <Check className="mr-1 inline h-3 w-3" />}{item}</span>)}</div><button type="button" onClick={onConnect} className={`patient-touch mt-auto rounded-2xl font-bold ${connected ? "bg-white text-emerald-700 ring-1 ring-emerald-200" : "bg-medical-600 text-white"}`}>{connected ? "连接检测通过" : "搜索并连接"}</button></article>;
+function DeviceCard({ icon: Icon, title, code, details, connected, onConnect, waitingLabel }: { icon: typeof Bluetooth; title: string; code: string; details: string[]; connected: boolean; onConnect: () => void; waitingLabel?: string }) {
+  return <article className={`flex flex-col rounded-3xl border p-6 ${connected ? "border-emerald-300 bg-emerald-50/60" : "border-slate-200 bg-slate-50"}`}><div className="flex items-start justify-between"><span className={`flex h-14 w-14 items-center justify-center rounded-2xl ${connected ? "bg-emerald-600 text-white" : "bg-white text-slate-500"}`}><Icon className="h-7 w-7" /></span><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${connected ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{connected ? "已连接" : "等待连接"}</span></div><h2 className="mt-5 text-xl font-bold text-slate-950">{title}</h2><p className="mt-1 text-xs font-semibold text-slate-400">{code}</p><div className="mt-5 grid grid-cols-3 gap-2">{details.map((item) => <span key={item} className={`rounded-xl px-2 py-3 text-center text-xs font-bold ${connected ? "bg-white text-emerald-700" : "bg-white text-slate-500"}`}>{connected && <Check className="mr-1 inline h-3 w-3" />}{item}</span>)}</div><button type="button" onClick={onConnect} disabled={Boolean(waitingLabel)} className={`patient-touch mt-auto rounded-2xl font-bold disabled:cursor-wait ${connected ? "bg-white text-emerald-700 ring-1 ring-emerald-200" : "bg-medical-600 text-white disabled:bg-slate-300"}`}>{connected ? "连接检测通过" : waitingLabel || "搜索并连接"}</button></article>;
 }
 
 function PsychScreen({ answers, setAnswer, onBack, onContinue }: { answers: Record<string, string>; setAnswer: (key: string, value: string) => void; onBack: () => void; onContinue: () => void }) {
@@ -870,10 +973,17 @@ function BpModeScreen({ mode, setMode, onBack, onStart }: { mode: BpMode | null;
 function TrainingScreen(props: {
   phase: Phase; setPhase: (value: Phase) => void; elapsed: number; paused: boolean; setPaused: (value: boolean) => void; bpMode: BpMode; measuredBp: string; measuredBpTime: string; onMeasureBp: () => void;
   targetHr: number; warmup: number; mainMinutes: number; cooldown: number; repeats: number; setElapsed: (value: number) => void; rpe: number; setRpe: (value: number) => void; anomaly: boolean; setAnomaly: (value: boolean) => void; onFinish: () => void;
+  liveMetric: BikeMetric | null; realtimeStatus: string; realtimeMessage: string;
 }) {
-  const { phase, setPhase, elapsed, paused, setPaused, bpMode, measuredBp, measuredBpTime, onMeasureBp, targetHr, warmup, mainMinutes, cooldown, repeats, setElapsed, rpe, setRpe, anomaly, setAnomaly, onFinish } = props;
-  const hr = anomaly ? targetHr + 24 : phase === "warmup" ? targetHr - 14 : phase === "cooldown" ? targetHr - 10 : targetHr + (elapsed % 5) - 2;
-  const speed = paused ? 0 : phase === "training" ? 22.6 : 16.8;
+  const { phase, setPhase, elapsed, paused, setPaused, bpMode, measuredBp, measuredBpTime, onMeasureBp, targetHr, warmup, mainMinutes, cooldown, repeats, setElapsed, rpe, setRpe, anomaly, setAnomaly, onFinish, liveMetric, realtimeStatus, realtimeMessage } = props;
+  const hr = liveMetric?.heart_rate ?? 0;
+  const speed = paused ? 0 : liveMetric?.speed ?? 0;
+  const power = paused ? 0 : liveMetric?.power ?? 0;
+  const resistance = liveMetric?.resistance ?? 0;
+  const spo2 = liveMetric?.spo2 ?? 0;
+  const calories = liveMetric?.calories ?? 0;
+  const distanceKm = (liveMetric?.distance ?? 0) / 1000;
+  const metricAnomaly = anomaly || (hr > 0 && hr > targetHr + 8);
   const phaseLabels: Record<Phase, string> = { warmup: "热身", training: "主要训练", cooldown: "放松" };
   const trainingMinutes = mainMinutes * repeats;
   const totalSeconds = (warmup + trainingMinutes + cooldown) * 60;
@@ -882,7 +992,7 @@ function TrainingScreen(props: {
   const remainingSeconds = Math.max(totalSeconds - elapsed, 0);
   const overallProgress = Math.min((elapsed / totalSeconds) * 100, 100);
   const hrZonePosition = Math.min(Math.max(((hr - (targetHr - 24)) / 48) * 100, 4), 96);
-  const hrStatus = anomaly
+  const hrStatus = metricAnomaly
     ? "心率高于目标区间，请降低踏频"
     : hr < targetHr - 8
       ? "正在进入目标心率区间"
@@ -965,19 +1075,19 @@ function TrainingScreen(props: {
                 autoPlay
                 playsInline
               />
-              <div className={`absolute left-4 top-4 rounded-2xl border px-4 py-2.5 text-white shadow-lg backdrop-blur-md ${anomaly ? "border-red-300/60 bg-red-600/85" : "border-white/20 bg-slate-950/60"}`}>
-                <div className="flex items-center gap-2 text-[10px] font-bold text-white/70"><HeartPulse className={`h-4 w-4 ${anomaly ? "animate-pulse text-white" : "text-rose-300"}`} />实时心率</div>
-                <div className="mt-1 flex items-end gap-1.5"><span className="text-4xl font-bold tabular-nums">{hr}</span><span className="mb-1 text-xs font-bold text-white/70">bpm</span></div>
+              <div className={`absolute left-4 top-4 rounded-2xl border px-4 py-2.5 text-white shadow-lg backdrop-blur-md ${metricAnomaly ? "border-red-300/60 bg-red-600/85" : "border-white/20 bg-slate-950/60"}`}>
+                <div className="flex items-center gap-2 text-[10px] font-bold text-white/70"><HeartPulse className={`h-4 w-4 ${metricAnomaly ? "animate-pulse text-white" : "text-rose-300"}`} />实时心率</div>
+                <div className="mt-1 flex items-end gap-1.5"><span className="text-4xl font-bold tabular-nums">{hr || "—"}</span><span className="mb-1 text-xs font-bold text-white/70">bpm</span></div>
                 <p className="mt-1 text-[10px] font-bold text-white/75">目标 {targetHr - 8}–{targetHr + 8}</p>
               </div>
               <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-medical-600/90 px-4 py-2 text-xs font-bold text-white shadow-lg backdrop-blur">{phaseLabels[phase]} · {formatTime(elapsed)}</div>
-              <div className="absolute right-4 top-4 flex items-center gap-2"><button type="button" onClick={() => trainingVideoPanelRef.current?.requestFullscreen?.()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-950/60 text-white backdrop-blur hover:bg-slate-950/80" aria-label="全屏跟练"><Maximize2 className="h-5 w-5" /></button></div>
+              <div className="absolute right-4 top-4 flex items-center gap-2"><span className={`rounded-xl px-3 py-2 text-[10px] font-bold text-white backdrop-blur ${realtimeStatus === "receiving" ? "bg-emerald-600/85" : "bg-slate-950/60"}`}><Wifi className="mr-1 inline h-3.5 w-3.5" />{realtimeStatus === "receiving" ? "功率车数据实时接收中" : realtimeMessage}</span><button type="button" onClick={() => trainingVideoPanelRef.current?.requestFullscreen?.()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-950/60 text-white backdrop-blur hover:bg-slate-950/80" aria-label="全屏跟练"><Maximize2 className="h-5 w-5" /></button></div>
               {paused && <div className="absolute inset-0 flex items-center justify-center"><div className="rounded-2xl bg-white/95 px-8 py-5 text-center shadow-xl"><Pause className="mx-auto h-8 w-8 text-medical-700" /><p className="mt-2 font-bold text-slate-900">训练已暂停</p><p className="mt-1 text-[10px] text-slate-500">点击“继续训练”恢复</p></div></div>}
-              {anomaly && !paused && <div className="absolute inset-0 flex items-center justify-center bg-red-950/20"><div className="rounded-2xl border border-red-200 bg-red-50/95 px-8 py-5 text-center text-red-800 shadow-xl"><AlertTriangle className="mx-auto h-8 w-8 animate-pulse text-red-600" /><p className="mt-2 text-base font-bold">请降低踏频并等待医护确认</p><p className="mt-1 text-xs text-red-600">心率已高于目标控制区间</p></div></div>}
+              {metricAnomaly && !paused && <div className="absolute inset-0 flex items-center justify-center bg-red-950/20"><div className="rounded-2xl border border-red-200 bg-red-50/95 px-8 py-5 text-center text-red-800 shadow-xl"><AlertTriangle className="mx-auto h-8 w-8 animate-pulse text-red-600" /><p className="mt-2 text-base font-bold">请降低踏频并等待医护确认</p><p className="mt-1 text-xs text-red-600">心率已高于目标控制区间</p></div></div>}
               <div className="absolute inset-x-4 bottom-4 z-20 flex items-center gap-3 rounded-2xl bg-slate-950/65 p-2.5 backdrop-blur-md">
                 <button type="button" onClick={() => setPaused(!paused)} className="patient-touch flex items-center justify-center gap-2 rounded-xl bg-white/95 font-bold text-medical-800 shadow-sm">{paused ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}{paused ? "继续训练" : "暂停训练"}</button>
                 <button type="button" onClick={nextPhase} className="patient-touch flex items-center justify-center gap-2 rounded-xl bg-medical-600 px-5 font-bold text-white shadow-lg">{phase === "cooldown" ? <CircleStop className="h-5 w-5" /> : <ArrowRight className="h-5 w-5" />}{phase === "cooldown" ? "结束训练" : "下一阶段"}</button>
-                <div className="ml-auto flex gap-4 px-2 text-right text-xs font-bold text-white"><span>功率 {phase === "training" ? "68" : "42"} W</span><span>血氧 97%</span><span>RPE {rpe}</span></div>
+                <div className="ml-auto flex gap-4 px-2 text-right text-xs font-bold text-white"><span>速度 {speed.toFixed(1)} km/h</span><span>功率 {power} W</span><span>阻力 {resistance}</span><span>血氧 {spo2 || "—"}%</span><span>RPE {rpe}</span></div>
               </div>
             </div>
 
@@ -1000,12 +1110,12 @@ function TrainingScreen(props: {
               </div>
               <div className="grid flex-1 grid-cols-2 gap-1.5">
                 <TrainingMetric icon={Gauge} label="速度" value={speed.toFixed(1)} unit="km/h" />
-                <TrainingMetric icon={Activity} label="距离" value={(elapsed * speed / 3600).toFixed(2)} unit="km" />
-                <TrainingMetric icon={Bike} label="功率" value={phase === "training" ? "68" : "42"} unit="W" />
-                <TrainingMetric icon={Settings2} label="阻力" value={phase === "training" ? "5" : "3"} unit="级" />
-                <TrainingMetric icon={ThermometerSun} label="血氧" value="97" unit="%" />
+                <TrainingMetric icon={Activity} label="距离" value={distanceKm.toFixed(2)} unit="km" />
+                <TrainingMetric icon={Bike} label="功率" value={String(power)} unit="W" />
+                <TrainingMetric icon={Settings2} label="阻力" value={String(resistance)} unit="级" />
+                <TrainingMetric icon={ThermometerSun} label="血氧" value={spo2 ? String(spo2) : "—"} unit="%" />
                 <button type="button" onClick={onMeasureBp} disabled={bpMode === "none"} className="rounded-xl border border-sky-100 bg-sky-50 p-2 text-left shadow-sm disabled:opacity-50"><p className="text-[9px] font-bold text-sky-600">血压</p><p className="mt-1 text-sm font-bold text-slate-950">{bpMode === "none" ? "— / —" : measuredBp}</p><p className="mt-0.5 text-[8px] text-slate-500">{bpMode === "none" ? "未测量" : measuredBpTime}</p></button>
-                <TrainingMetric icon={Clock3} label="热量" value={String(Math.round(elapsed / 8))} unit="kcal" />
+                <TrainingMetric icon={Clock3} label="热量" value={calories.toFixed(1)} unit="kcal" />
                 <label className="rounded-xl border border-violet-100 bg-violet-50 p-2 shadow-sm"><p className="text-[9px] font-bold text-violet-600">RPE</p><p className="mt-1 text-sm font-bold text-slate-950">{rpe}<span className="ml-1 text-[8px] text-slate-500">/20</span></p><input type="range" min="6" max="20" value={rpe} onChange={(event) => setRpe(Number(event.target.value))} className="mt-1 w-full accent-violet-600" /></label>
               </div>
             </aside>
@@ -1031,19 +1141,23 @@ function ResultScreen({
   targetHr,
   rpe,
   bp,
-  onDone
+  onDone,
+  record,
+  metric
 }: {
   totalMinutes: number;
   targetHr: number;
   rpe: number;
   bp: string;
   onDone: () => void;
+  record?: ExerciseRecord;
+  metric: BikeMetric | null;
 }) {
   const [aiOpen, setAiOpen] = useState(false);
   return (
     <section className="grid h-full min-h-[610px] grid-cols-[0.8fr_1.2fr] gap-5" data-testid="page-VIEW-PATIENT-RESULT">
       <article className="flex flex-col items-center justify-center rounded-3xl bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-8 text-center text-white shadow-xl"><span className="flex h-24 w-24 items-center justify-center rounded-full bg-white/15 ring-8 ring-white/5"><CheckCircle2 className="h-14 w-14" /></span><p className="mt-7 text-sm font-bold text-teal-100">第 {patient.completed + 1} 次训练</p><h1 className="mt-2 text-4xl font-bold">训练已完成</h1><p className="mt-3 max-w-sm text-sm leading-6 text-teal-50/75">本次训练记录已生成。</p><div className="mt-8 w-full space-y-3"><button type="button" onClick={() => setAiOpen((value) => !value)} className="patient-touch flex w-full items-center justify-center gap-2 rounded-2xl bg-white font-bold text-medical-900"><Sparkles className="h-5 w-5" /> AI 解读</button><button type="button" onClick={onDone} className="patient-touch flex w-full items-center justify-center gap-2 rounded-2xl bg-white/10 font-bold text-white ring-1 ring-white/25 hover:bg-white/15"><House className="h-5 w-5" /> 返回训练工作台</button></div></article>
-      <article className="rounded-3xl border border-white bg-white p-7 shadow-card"><div className="flex items-center justify-between"><div><p className="text-xs font-bold text-medical-600">训练报告</p><h2 className="mt-1 text-2xl font-bold text-slate-950">本次与历史成绩对比</h2></div><span className="rounded-full bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-700">已完成</span></div><div className="mt-6 grid grid-cols-2 gap-4"><section className="rounded-2xl bg-slate-100 p-5"><p className="text-xs font-bold text-slate-500">历史平均（近 5 次）</p><div className="mt-4 grid grid-cols-3 gap-3 text-center">{[["时长", "28 分"], ["平均功率", "56 W"], ["距离", "7.6 km"]].map(([label, value]) => <div key={label}><p className="text-lg font-bold text-slate-800">{value}</p><p className="mt-1 text-[10px] text-slate-500">{label}</p></div>)}</div></section><section className="rounded-2xl bg-medical-50 p-5 ring-1 ring-medical-100"><p className="text-xs font-bold text-medical-700">本次训练</p><div className="mt-4 grid grid-cols-3 gap-3 text-center">{[["时长", `${totalMinutes} 分`], ["平均功率", "64 W"], ["距离", "8.4 km"]].map(([label, value]) => <div key={label}><p className="text-lg font-bold text-medical-900">{value}</p><p className="mt-1 text-[10px] text-medical-700">{label}</p></div>)}</div></section></div><div className="mt-5 grid grid-cols-4 gap-3">{[["平均心率", `${targetHr - 2} bpm`], ["靶区时间", "18 分 42 秒"], ["结束血压", `${bp} mmHg`], ["RPE", `${rpe} / 20`]].map(([label, value]) => <div className="rounded-2xl border border-slate-100 bg-white p-4" key={label}><p className="text-xs font-bold text-slate-400">{label}</p><p className="mt-2 text-lg font-bold text-slate-900">{value}</p></div>)}</div>{aiOpen && <div className="mt-5 rounded-2xl border border-violet-100 bg-violet-50 p-5"><p className="flex items-center gap-2 font-bold text-violet-900"><Sparkles className="h-5 w-5" />AI 解读</p><p className="mt-2 text-sm leading-6 text-violet-900">本次训练时长与计划一致，平均功率较近 5 次提升，主观用力程度保持在可接受范围。请结合训练后感受与医护人员意见安排下一次训练。</p></div>}</article>
+      <article className="rounded-3xl border border-white bg-white p-7 shadow-card"><div className="flex items-center justify-between"><div><p className="text-xs font-bold text-medical-600">单次训练报告</p><h2 className="mt-1 text-2xl font-bold text-slate-950">本次云端训练记录</h2><p className="mt-1 text-xs text-slate-500">{record?.record_id || metric?.record_id || "等待后端完成记录聚合"}</p></div><span className="rounded-full bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-700">{record ? "已写入云端" : "正在同步"}</span></div><div className="mt-6 grid grid-cols-3 gap-4">{[["时长", `${record?.duration_min ?? totalMinutes} 分`], ["平均心率", `${record?.avg_heart_rate ?? metric?.heart_rate ?? "—"} bpm`], ["最大心率", `${record?.max_heart_rate ?? "—"} bpm`], ["末次功率", `${metric?.power ?? "—"} W`], ["末次距离", metric?.distance === undefined ? "—" : `${(metric.distance / 1000).toFixed(2)} km`], ["总热量", `${record?.calories ?? metric?.calories ?? "—"} kcal`]].map(([label, value]) => <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4" key={label}><p className="text-xs font-bold text-slate-400">{label}</p><p className="mt-2 text-lg font-bold text-slate-900">{value}</p></div>)}</div><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-2xl border border-sky-100 bg-sky-50 p-4"><p className="text-xs font-bold text-sky-700">结束血压</p><p className="mt-2 text-lg font-bold text-slate-900">{bp} mmHg</p></div><div className="rounded-2xl border border-violet-100 bg-violet-50 p-4"><p className="text-xs font-bold text-violet-700">RPE</p><p className="mt-2 text-lg font-bold text-slate-900">{rpe} / 20</p></div></div>{aiOpen && <div className="mt-5 rounded-2xl border border-violet-100 bg-violet-50 p-5"><p className="flex items-center gap-2 font-bold text-violet-900"><Sparkles className="h-5 w-5" />AI 解读</p><p className="mt-2 text-sm leading-6 text-violet-900">AI 报告解读应由同事的报告管理后端生成并经医生确认；Pad 当前仅展示本次真实训练数据，不生成临床结论。</p></div>}</article>
     </section>
   );
 }
@@ -1051,6 +1165,71 @@ function ResultScreen({
 function CalendarScreen({ onBack }: { onBack: () => void }) {
   const days = Array.from({ length: 31 }, (_, index) => index + 1);
   return <section className="rounded-3xl border border-white bg-white p-7 shadow-card"><div className="flex items-center justify-between"><div><p className="text-xs font-bold text-medical-600">训练记录</p><h1 className="mt-1 text-2xl font-bold text-slate-950">2026 年 7 月打卡日历</h1></div><button type="button" onClick={onBack} className="btn-secondary"><ArrowLeft className="h-4 w-4" /> 返回首页</button></div><div className="mt-7 grid grid-cols-7 gap-3">{["一", "二", "三", "四", "五", "六", "日"].map((day) => <p key={day} className="text-center text-xs font-bold text-slate-400">周{day}</p>)}{days.map((day) => { const done = [2, 4, 7, 9, 11, 14, 16, 18, 22, 23, 25].includes(day); return <div key={day} className={`flex h-16 items-center justify-center rounded-2xl text-sm font-bold ${day === 26 ? "bg-medical-600 text-white ring-4 ring-medical-100" : done ? "bg-emerald-50 text-emerald-700" : "bg-slate-50 text-slate-500"}`}>{done ? <span className="text-center"><Check className="mx-auto h-4 w-4" /><small className="text-[9px]">已训练</small></span> : day}</div>; })}</div></section>;
+}
+
+function CloudReportScreen({ patient, records, selectedReport, onRefresh, onSelect, onClear, onStart }: {
+  patient: RehabPatient;
+  records: ExerciseRecord[];
+  selectedReport: ExerciseReport | null;
+  onRefresh: () => Promise<void>;
+  onSelect: (recordId: string) => Promise<void>;
+  onClear: () => void;
+  onStart: () => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run(action: () => Promise<void>) {
+    setLoading(true);
+    setError("");
+    try {
+      await action();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "训练记录读取失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (selectedReport) {
+    const details = selectedReport.details || [];
+    const values = (key: keyof ExerciseRecordDetail) => details.map((item) => Number(item[key])).filter(Number.isFinite);
+    const average = (key: keyof ExerciseRecordDetail) => {
+      const items = values(key);
+      return items.length ? items.reduce((sum, value) => sum + value, 0) / items.length : null;
+    };
+    const maximum = (key: keyof ExerciseRecordDetail) => {
+      const items = values(key);
+      return items.length ? Math.max(...items) : null;
+    };
+    const last = details[details.length - 1];
+    const cards = [
+      ["训练时长", `${selectedReport.duration_min ?? "—"} 分钟`],
+      ["平均 / 最大心率", `${selectedReport.avg_heart_rate ?? average("heart_rate")?.toFixed(0) ?? "—"} / ${selectedReport.max_heart_rate ?? maximum("heart_rate")?.toFixed(0) ?? "—"} bpm`],
+      ["平均 / 最大功率", `${average("power")?.toFixed(0) ?? "—"} / ${maximum("power")?.toFixed(0) ?? "—"} W`],
+      ["平均速度", `${average("speed")?.toFixed(1) ?? "—"} km/h`],
+      ["最终距离", `${last?.distance === undefined ? "—" : (last.distance / 1000).toFixed(2)} km`],
+      ["总热量", `${selectedReport.calories ?? last?.calories ?? "—"} kcal`],
+      ["最低血氧", `${values("spo2").length ? Math.min(...values("spo2")) : "—"} %`],
+      ["采样点数", `${details.length} 条`]
+    ];
+    return <section className="space-y-4" data-testid="page-VIEW-CLOUD-SINGLE-REPORT">
+      <header className="flex items-center justify-between rounded-3xl border border-white bg-white px-6 py-5 shadow-card"><div><p className="text-xs font-bold text-medical-600">云端单次报告</p><h1 className="mt-1 text-2xl font-bold text-slate-950">{patient.full_name} · 功率车训练</h1><p className="mt-1 text-xs text-slate-500">记录编号 {selectedReport.record_id} · {formatCloudDate(selectedReport.start_time)}</p></div><button type="button" onClick={onClear} className="btn-secondary"><ArrowLeft className="h-4 w-4" />返回列表</button></header>
+      <article className="rounded-3xl border border-white bg-white p-6 shadow-card"><div className="grid grid-cols-4 gap-3">{cards.map(([label, value]) => <div key={label} className="rounded-2xl bg-slate-50 p-4"><p className="text-xs font-bold text-slate-400">{label}</p><p className="mt-2 text-lg font-bold text-slate-900">{value}</p></div>)}</div><div className="mt-5 rounded-2xl border border-blue-100 bg-blue-50 p-4 text-sm leading-6 text-blue-900">本页直接读取云库中的 <b>exercise_records</b> 与 <b>exercise_details</b>，与同事 Web 端报告管理共用同一份训练数据。阶段性报告暂不在 Pad 生成。</div></article>
+    </section>;
+  }
+
+  return <section className="space-y-4" data-testid="page-VIEW-CLOUD-REPORT-LIST">
+    <header className="flex items-center justify-between rounded-3xl border border-white bg-white px-6 py-5 shadow-card"><div><p className="text-xs font-bold text-medical-600">训练历史</p><h1 className="mt-1 text-2xl font-bold text-slate-950">{patient.full_name}的单次训练记录</h1><p className="mt-1 text-xs text-slate-500">病案号 {patient.patient_id} · 云端共 {records.length} 条</p></div><div className="flex gap-3"><button type="button" onClick={() => void run(onRefresh)} disabled={loading} className="btn-secondary"><RotateCcw className="h-4 w-4" />{loading ? "刷新中" : "刷新"}</button><button type="button" onClick={onStart} className="btn-primary"><Play className="h-4 w-4" />开始训练</button></div></header>
+    {error && <div className="rounded-2xl border border-red-100 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
+    <article className="overflow-hidden rounded-3xl border border-white bg-white shadow-card"><div className="grid grid-cols-[1.4fr_1.2fr_0.8fr_0.8fr_0.8fr_0.7fr] bg-slate-50 px-5 py-3 text-[11px] font-bold text-slate-400"><span>记录编号</span><span>训练时间</span><span>时长</span><span>平均心率</span><span>最大心率</span><span>查看</span></div>{records.map((record) => <button type="button" key={record.record_id} onClick={() => void run(() => onSelect(record.record_id))} className="grid w-full grid-cols-[1.4fr_1.2fr_0.8fr_0.8fr_0.8fr_0.7fr] items-center border-t border-slate-100 px-5 py-4 text-left text-xs text-slate-600 hover:bg-medical-50/60"><span className="font-bold text-slate-800">{record.record_id}</span><span>{formatCloudDate(record.start_time)}</span><span>{record.duration_min ?? "—"} 分</span><span>{record.avg_heart_rate ?? "—"} bpm</span><span>{record.max_heart_rate ?? "—"} bpm</span><span className="font-bold text-medical-700">详情 <ChevronRight className="inline h-3.5 w-3.5" /></span></button>)}{!records.length && <div className="p-12 text-center text-sm text-slate-500">暂无云端训练记录，请先通过功率车模拟器完成一次训练。</div>}</article>
+  </section>;
+}
+
+function formatCloudDate(value?: string | null) {
+  if (!value) return "未记录";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function ReportScreen({
