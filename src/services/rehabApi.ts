@@ -165,7 +165,14 @@ export function subscribeBikeRealtime(patientUserId: string, onEvent: (event: Bi
   let socket: WebSocket | undefined;
 
   const connect = () => {
-    socket = new WebSocket(`${wsBase}/ws/watch/${encodeURIComponent(patientUserId)}`);
+    try {
+      socket = new WebSocket(`${wsBase}/ws/watch/${encodeURIComponent(patientUserId)}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法创建实时数据连接";
+      onEvent({ type: "error", message: `功率车实时通道连接失败：${message}` });
+      if (!closedByClient) retryTimer = window.setTimeout(connect, 3000);
+      return;
+    }
     socket.onopen = () => onEvent({ type: "connected" });
     socket.onmessage = (event) => {
       try {
