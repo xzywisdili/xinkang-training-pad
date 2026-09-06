@@ -54,19 +54,14 @@ import { stageReportData, summarizeVersion } from "./stageReportData";
 import type { PrescriptionVersion, VersionSummary } from "./stageReportData";
 import { clinicalSnapshotChen, getPrescriptionVersionDetail, getSingleTrainingReportDetail, patientMasterChen, singleTrainingReportDetails } from "../clinicalSharedData";
 import { recognizeMedicalRecord } from "../services/medicalRecordOcr";
-import {
-  findPatientByRecordNumber,
-  getExerciseReport,
-  getLatestSignedPrescription,
-  listPatientExercises,
-  subscribeBikeRealtime,
-  type BikeMetric,
-  type ExerciseRecord,
-  type ExerciseRecordDetail,
-  type ExerciseReport,
-  type RehabPatient,
-  type RehabPrescription
+import type {
+  ExerciseRecord,
+  ExerciseRecordDetail,
+  ExerciseReport,
+  RehabPatient,
+  RehabPrescription
 } from "../services/rehabApi";
+import { trainingDevice, type DeviceMetric } from "../native/trainingDevice";
 
 type PatientAppProps = {
   onExit: () => void;
@@ -138,6 +133,13 @@ const patient = {
 
 const activePrescription = getPrescriptionVersionDetail("V4");
 const bikeTrainingVideoUrl = "/media/phase1-bike-training.mp4";
+const localBikePatient: RehabPatient = {
+  user_id: "local-bike-session",
+  patient_id: "现场训练",
+  full_name: "功率车用户",
+  rehab_phase: "院内训练",
+  risk_level: "由医护现场确认"
+};
 
 const flow = [
   ["prescription", "确认处方"],
@@ -155,7 +157,7 @@ export function PatientApp({
   setAnomaly,
   publishedTrainingVideos
 }: PatientAppProps) {
-  const [view, setView] = useState<View>("intake");
+  const [view, setView] = useState<View>("workbench");
   const [exercise, setExercise] = useState<Exercise>("bike");
   const [trainingType] = useState<TrainingType>("continuous");
   const [targetHr] = useState(Math.round((activePrescription.targetHr[0] + activePrescription.targetHr[1]) / 2));
@@ -163,7 +165,6 @@ export function PatientApp({
   const [mainMinutes] = useState(activePrescription.trainingMinutes);
   const [cooldown] = useState(activePrescription.cooldownMinutes);
   const [repeats] = useState(1);
-  const [backpack, setBackpack] = useState(false);
   const [bikeConnected, setBikeConnected] = useState(false);
   const [psychAnswers, setPsychAnswers] = useState<Record<string, string>>({});
   const [bpMode, setBpMode] = useState<BpMode | null>(null);
@@ -173,14 +174,10 @@ export function PatientApp({
   const [paused, setPaused] = useState(false);
   const [measuredBp, setMeasuredBp] = useState("126 / 78");
   const [measuredBpTime, setMeasuredBpTime] = useState("09:18");
-  const [reportToOpen, setReportToOpen] = useState<string | null>(null);
-  const [activePatient, setActivePatient] = useState<RehabPatient | null>(null);
-  const [cloudPrescription, setCloudPrescription] = useState<RehabPrescription | null>(null);
-  const [exerciseRecords, setExerciseRecords] = useState<ExerciseRecord[]>([]);
-  const [selectedCloudReport, setSelectedCloudReport] = useState<ExerciseReport | null>(null);
-  const [liveMetric, setLiveMetric] = useState<BikeMetric | null>(null);
+  const [liveMetric, setLiveMetric] = useState<DeviceMetric | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState<"offline" | "connected" | "receiving" | "ended" | "error">("offline");
-  const [realtimeMessage, setRealtimeMessage] = useState("尚未连接实时数据通道");
+  const [realtimeMessage, setRealtimeMessage] = useState("尚未初始化功率车");
+  const sessionId = useRef("");
   const selectedTrainingVideo = publishedTrainingVideos.find((video) => video.subtype === exerciseVideoSubtypes[exercise]) ?? null;
 
   const totalMinutes = warmup + mainMinutes * repeats + cooldown;
@@ -190,58 +187,56 @@ export function PatientApp({
     return () => window.clearInterval(timer);
   }, [view, paused, trainingState]);
 
-  useEffect(() => () => stopAudioGuidance(), []);
-
   useEffect(() => {
-    if (!activePatient) return;
-    return subscribeBikeRealtime(activePatient.user_id, (event) => {
-      if (event.type === "connected") {
-        setRealtimeStatus("connected");
-        setRealtimeMessage("已连接后端，等待功率车发送数据");
-        return;
-      }
-      if (event.type === "error") {
-        setRealtimeStatus("error");
-        setRealtimeMessage(event.message || "实时数据通道异常");
-        return;
-      }
-      if (event.metric) setLiveMetric(event.metric);
-      if (event.type === "start" || event.type === "sample") {
-        setRealtimeStatus("receiving");
-        setRealtimeMessage(`正在接收功率车数据${event.metric?.record_id ? ` · ${event.metric.record_id}` : ""}`);
-        setBikeConnected(true);
-      }
-      if (event.type === "end") {
-        setRealtimeStatus("ended");
-        setRealtimeMessage("功率车训练数据已结束并写入云端");
-        void refreshExerciseRecords(activePatient.user_id);
-      }
+    const removeMetrics = trainingDevice.subscribeMetrics((metric) => {
+      setLiveMetric(metric);
+      setBikeConnected(true);
+      setRealtimeStatus("receiving");
+      setRealtimeMessage("正在读取真实功率车数据");
     });
-  }, [activePatient?.user_id]);
+    const removeErrors = trainingDevice.subscribeErrors((message) => {
+      setRealtimeStatus("error");
+      setRealtimeMessage(message);
+    });
+    return () => {
+      removeMetrics();
+      removeErrors();
+      stopAudioGuidance();
+    };
+  }, []);
 
-  async function refreshExerciseRecords(patientUserId: string) {
-    const records = await listPatientExercises(patientUserId);
-    setExerciseRecords([...records].sort((left, right) => String(right.start_time || "").localeCompare(String(left.start_time || ""))));
+  async function connectBike() {
+    setRealtimeStatus("offline");
+    setRealtimeMessage("正在初始化真实功率车…");
+    try {
+      await trainingDevice.connect();
+      setBikeConnected(true);
+      setRealtimeStatus("connected");
+      setRealtimeMessage("功率车已初始化，开始训练后将读取实时数据");
+    } catch (error) {
+      setBikeConnected(false);
+      setRealtimeStatus("error");
+      setRealtimeMessage(error instanceof Error ? error.message : "功率车初始化失败");
+    }
   }
 
-  async function registerPatient(recordNumber: string) {
-    const patientRecord = await findPatientByRecordNumber(recordNumber);
-    setActivePatient(patientRecord);
-    const [records, prescription] = await Promise.all([
-      listPatientExercises(patientRecord.user_id),
-      getLatestSignedPrescription(patientRecord.user_id)
-    ]);
-    setExerciseRecords([...records].sort((left, right) => String(right.start_time || "").localeCompare(String(left.start_time || ""))));
-    setCloudPrescription(prescription);
-    setView("workbench");
+  async function resetBike() {
+    await trainingDevice.disconnect();
+    setBikeConnected(false);
+    setLiveMetric(null);
+    setRealtimeStatus("offline");
+    setRealtimeMessage("尚未初始化功率车");
   }
 
-  async function openCloudReport(recordId: string) {
-    if (!activePatient) return;
-    setSelectedCloudReport(await getExerciseReport(activePatient.user_id, recordId));
-  }
-
-  function startTraining() {
+  async function startTraining() {
+    sessionId.current = `bike-${Date.now()}`;
+    try {
+      await trainingDevice.startSession(sessionId.current);
+    } catch (error) {
+      setRealtimeStatus("error");
+      setRealtimeMessage(error instanceof Error ? error.message : "真实功率车启动失败");
+      return;
+    }
     setPhase("warmup");
     setElapsed(0);
     setPaused(false);
@@ -264,16 +259,17 @@ export function PatientApp({
     }
   }
 
-  function finishTraining() {
+  async function finishTraining() {
+    await trainingDevice.stopSession(sessionId.current);
     stopAudioGuidance();
     setTrainingState("completed");
+    setRealtimeStatus("ended");
+    setRealtimeMessage("本次真实功率车训练已结束");
     setView("result");
-    if (activePatient) void refreshExerciseRecords(activePatient.user_id);
   }
 
   function resetSession() {
     setExercise("bike");
-    setBackpack(false);
     setBikeConnected(false);
     setPsychAnswers({});
     setBpMode(null);
@@ -282,13 +278,8 @@ export function PatientApp({
     setPaused(false);
     setAnomaly(false);
     setTrainingState("ready");
-    setReportToOpen(null);
     setView("workbench");
   }
-
-  if (view === "intake") return <IntakeScreen onExit={onExit} onContinue={registerPatient} />;
-
-  const mainView = view === "home" || view === "calendar" || view === "report" || view === "profile";
 
   return (
     <main className="ipad-stage min-h-screen" data-testid="page-VIEW-PATIENT-APP">
@@ -300,7 +291,6 @@ export function PatientApp({
               setView("workbench");
               return;
             }
-            if (nextView === "report") setReportToOpen(null);
             setView(nextView);
           }}
         />
@@ -309,7 +299,7 @@ export function PatientApp({
           {flow.some(([key]) => key === view) && <FlowBar view={view} />}
 
           <div className="min-h-0 flex-1 py-3">
-          {view === "workbench" && <TrainingWorkbench patient={activePatient} realtimeStatus={realtimeStatus} onStart={() => setView("trainingProject")} onHistory={() => setView("report")} />}
+          {view === "workbench" && <TrainingWorkbench patient={localBikePatient} realtimeStatus={realtimeStatus} onStart={() => setView("trainingProject")} />}
           {view === "trainingProject" && <TrainingProjectScreen onBack={() => setView("workbench")} onChooseBike={() => { setExercise("bike"); setView("prescription"); }} />}
           {view === "home" && (
             <HomeScreen
@@ -320,17 +310,6 @@ export function PatientApp({
             />
           )}
           {view === "calendar" && <CalendarScreen onBack={() => setView("home")} />}
-          {view === "report" && activePatient && (
-            <CloudReportScreen
-              patient={activePatient}
-              records={exerciseRecords}
-              selectedReport={selectedCloudReport}
-              onRefresh={() => refreshExerciseRecords(activePatient.user_id)}
-              onSelect={openCloudReport}
-              onClear={() => setSelectedCloudReport(null)}
-              onStart={() => setView("prescription")}
-            />
-          )}
           {view === "profile" && <ProfileScreen onBack={() => setView("home")} />}
           {view === "prescription" && (
             <PrescriptionScreen
@@ -344,18 +323,14 @@ export function PatientApp({
               totalMinutes={totalMinutes}
               onBack={() => setView("home")}
               onContinue={() => setView("devices")}
-              cloudPrescription={cloudPrescription}
+              cloudPrescription={null}
             />
           )}
           {view === "devices" && (
             <DeviceScreen
-              backpack={backpack}
               bike={bikeConnected}
-              onBackpack={() => setBackpack(true)}
-              onReset={() => {
-                setBackpack(false);
-                setBikeConnected(false);
-              }}
+              onConnect={() => void connectBike()}
+              onReset={() => void resetBike()}
               onBack={() => setView("prescription")}
               onContinue={() => setView("psych")}
               realtimeStatus={realtimeStatus}
@@ -385,6 +360,10 @@ export function PatientApp({
               elapsed={elapsed}
               paused={paused}
               setPaused={(value) => {
+                void (value ? trainingDevice.pauseSession() : trainingDevice.resumeSession()).catch((error) => {
+                  setRealtimeStatus("error");
+                  setRealtimeMessage(error instanceof Error ? error.message : "功率车状态切换失败");
+                });
                 setPaused(value);
                 setTrainingState(value ? "paused" : "running");
               }}
@@ -419,7 +398,7 @@ export function PatientApp({
               rpe={rpe}
               bp={measuredBp}
               onDone={resetSession}
-              record={exerciseRecords[0]}
+              record={undefined}
               metric={liveMetric}
             />
           )}
@@ -584,10 +563,9 @@ function IntakeScreen({ onExit, onContinue }: { onExit: () => void; onContinue: 
   );
 }
 
-function TrainingWorkbench({ patient, realtimeStatus, onStart, onHistory }: { patient: RehabPatient | null; realtimeStatus: string; onStart: () => void; onHistory: () => void }) {
-  return <section className="mx-auto grid min-h-[610px] max-w-5xl grid-cols-2 gap-6 py-7" data-testid="page-VIEW-TRAINING-WORKBENCH">
-    <button type="button" onClick={onStart} className="group flex flex-col justify-between rounded-[32px] bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-9 text-left text-white shadow-xl transition hover:-translate-y-1"><span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/15"><Play className="h-8 w-8 fill-current" /></span><div><p className="text-sm font-bold text-teal-100">{patient?.full_name || "已核验患者"} · {patient?.patient_id || "—"}</p><h1 className="mt-2 text-4xl font-bold">开始训练</h1><p className="mt-4 max-w-sm text-sm leading-6 text-teal-50/80">核对处方、连接设备并完成本次康复训练。</p><p className="mt-3 text-xs font-bold text-teal-100">实时通道：{realtimeStatus === "receiving" ? "正在接收数据" : realtimeStatus === "connected" ? "已连接，等待设备" : "连接检查中"}</p></div><span className="mt-10 flex items-center gap-2 text-sm font-bold">进入训练 <ArrowRight className="h-5 w-5" /></span></button>
-    <button type="button" onClick={onHistory} className="group flex flex-col justify-between rounded-[32px] border border-medical-100 bg-white p-9 text-left shadow-card transition hover:-translate-y-1 hover:border-medical-300"><span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-medical-50 text-medical-700"><TrendingUp className="h-8 w-8" /></span><div><p className="text-sm font-bold text-medical-700">训练回顾</p><h1 className="mt-2 text-4xl font-bold text-slate-950">训练历史</h1><p className="mt-4 max-w-sm text-sm leading-6 text-slate-500">查看历次训练趋势、完成情况与详细记录。</p></div><span className="mt-10 flex items-center gap-2 text-sm font-bold text-medical-700">查看历史 <ArrowRight className="h-5 w-5" /></span></button>
+function TrainingWorkbench({ patient, realtimeStatus, onStart }: { patient: RehabPatient | null; realtimeStatus: string; onStart: () => void }) {
+  return <section className="mx-auto flex min-h-[610px] max-w-5xl items-center justify-center py-7" data-testid="page-VIEW-TRAINING-WORKBENCH">
+    <button type="button" onClick={onStart} className="group flex min-h-[470px] w-full max-w-3xl flex-col justify-between rounded-[36px] bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-12 text-left text-white shadow-xl transition hover:-translate-y-1"><span className="flex h-20 w-20 items-center justify-center rounded-3xl bg-white/15"><Bike className="h-10 w-10" /></span><div><p className="text-sm font-bold text-teal-100">{patient?.full_name || "功率车用户"} · 本机训练</p><h1 className="mt-3 text-5xl font-bold">真实功率车训练</h1><p className="mt-5 max-w-xl text-base leading-7 text-teal-50/80">无需模拟器和后端患者校验，直接连接本机功率车并读取实时运动数据。</p><p className="mt-4 text-sm font-bold text-teal-100">设备状态：{realtimeStatus === "receiving" ? "正在接收真实数据" : realtimeStatus === "connected" ? "功率车已初始化" : "进入后连接功率车"}</p></div><span className="mt-10 flex items-center gap-2 text-base font-bold">进入训练准备 <ArrowRight className="h-6 w-6" /></span></button>
   </section>;
 }
 
@@ -860,7 +838,7 @@ function PrescriptionScreen(props: {
       <article className="w-full rounded-3xl border border-white bg-white p-7 shadow-card">
         <div className="flex items-start justify-between gap-6">
           <div><p className="text-xs font-bold text-medical-600">训练处方确认</p><h1 className="mt-2 text-2xl font-bold text-slate-950">今日功率车训练</h1><p className="mt-2 text-sm text-slate-500">核对本次训练的核心参数后进入设备检查。</p></div>
-          <span className={`rounded-full px-4 py-2 text-xs font-bold ${cloudPrescription ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>{cloudPrescription ? "云端处方已签署" : "设备联调模式"}</span>
+          <span className={`rounded-full px-4 py-2 text-xs font-bold ${cloudPrescription ? "bg-emerald-50 text-emerald-700" : "bg-medical-50 text-medical-800"}`}>{cloudPrescription ? "云端处方已签署" : "本机训练处方"}</span>
         </div>
         <div className="mt-7 grid grid-cols-4 gap-4">
           <ReadOnlyPrescriptionItem label="训练方式" value={exercise === "bike" ? prescription.exerciseProject : "视频跟练"} />
@@ -873,7 +851,7 @@ function PrescriptionScreen(props: {
         </div>
         {cloudPrescription
           ? <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800"><ShieldCheck className="mr-2 inline h-5 w-5" />处方 {cloudPrescription.prescription_code || cloudPrescription.id} 已由 {cloudPrescription.doctor_full_name || cloudPrescription.signed_by || "医生"} 签署。</div>
-          : <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900"><AlertTriangle className="mr-2 inline h-5 w-5" />后端尚未提供 Pad 处方 token，以上参数仅用于功率车联调，不作为正式临床处方。</div>}
+          : <div className="mt-4 rounded-2xl border border-medical-100 bg-medical-50 p-4 text-sm font-bold text-medical-900"><ShieldCheck className="mr-2 inline h-5 w-5" />本版本使用本机训练参数，不依赖模拟后端；开始前请由现场医护确认训练强度。</div>}
         <div className="mt-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-800"><b>停止条件：</b>{prescription.advice.stopConditions}</div>
         <div className="mt-6 flex justify-between"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回</button><button type="button" onClick={onContinue} className="btn-primary patient-touch px-7">确认并检查设备 <ArrowRight className="h-5 w-5" /></button></div>
       </article>
@@ -897,17 +875,17 @@ function SelectMinutes({ label, value, options, onChange }: { label: string; val
   return <label className="rounded-2xl border border-slate-200 p-4"><span className="text-xs font-bold text-slate-500">{label}</span><select value={value} onChange={(event) => onChange(Number(event.target.value))} className="mt-3 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 font-bold text-slate-800 outline-none">{options.map((option) => <option key={option} value={option}>{option} 分钟</option>)}</select></label>;
 }
 
-function DeviceScreen({ backpack, bike, onBackpack, onReset, onBack, onContinue, realtimeStatus, realtimeMessage }: { backpack: boolean; bike: boolean; onBackpack: () => void; onReset: () => void; onBack: () => void; onContinue: () => void; realtimeStatus: string; realtimeMessage: string }) {
-  const allReady = backpack && bike;
+function DeviceScreen({ bike, onConnect, onReset, onBack, onContinue, realtimeStatus, realtimeMessage }: { bike: boolean; onConnect: () => void; onReset: () => void; onBack: () => void; onContinue: () => void; realtimeStatus: string; realtimeMessage: string }) {
   return (
     <section className="flex h-full min-h-[560px] flex-col rounded-3xl border border-white bg-white p-7 shadow-card" data-testid="page-VIEW-PATIENT-DEVICES">
-      <div className="flex items-start justify-between"><div><p className="text-xs font-bold text-medical-600">训练前准备 · 第 1 项</p><h1 className="mt-2 text-2xl font-bold text-slate-950">连接背包与功率车</h1><p className="mt-2 text-sm text-slate-500">两个设备均连接通过后，才能进入下一步。</p></div><span className={`rounded-full px-4 py-2 text-xs font-bold ${allReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{allReady ? "设备已就绪" : `已连接 ${Number(backpack) + Number(bike)} / 2`}</span></div>
-      <div className="mt-8 grid flex-1 grid-cols-2 gap-5">
-        <DeviceCard icon={Bluetooth} title="智能监测背包" code="CARDIO-BAG-08" details={["心率传感器", "血氧传感器", "血压模块"]} connected={backpack} onConnect={onBackpack} />
-        <DeviceCard icon={Bike} title="功率车模拟器" code="bike-sim-001" details={["速度 / 距离", "功率 / 阻力", "心率 / 血氧"]} connected={bike} onConnect={() => undefined} waitingLabel={realtimeStatus === "connected" ? "请在模拟器点击开始" : "正在连接后端"} />
+      <div className="flex items-start justify-between"><div><p className="text-xs font-bold text-medical-600">训练前准备 · 第 1 项</p><h1 className="mt-2 text-2xl font-bold text-slate-950">连接真实功率车</h1><p className="mt-2 text-sm text-slate-500">直接初始化车载平板内的功率车设备接口，不再连接模拟器。</p></div><span className={`rounded-full px-4 py-2 text-xs font-bold ${bike ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{bike ? "功率车已就绪" : "等待初始化"}</span></div>
+      <div className="mt-8 flex flex-1 justify-center">
+        <div className="w-full max-w-3xl">
+          <DeviceCard icon={Bike} title="海思瑞格功率车" code="本机设备接口" details={["速度 / 距离", "功率 / 阻力", "踏频 / 热量"]} connected={bike} onConnect={onConnect} waitingLabel={realtimeStatus === "offline" && realtimeMessage.includes("正在") ? "正在初始化" : undefined} />
+        </div>
       </div>
-      <div className={`mt-5 rounded-2xl border p-4 text-sm ${realtimeStatus === "error" ? "border-red-100 bg-red-50 text-red-800" : "border-sky-100 bg-sky-50 text-sky-800"}`}><Wifi className="mr-2 inline h-5 w-5" />{realtimeMessage}</div>
-      <div className="mt-6 flex justify-between"><div className="flex gap-3"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回处方</button><button type="button" onClick={onReset} className="btn-secondary patient-touch"><RotateCcw className="h-4 w-4" /> 重新检测</button></div><button type="button" disabled={!allReady} onClick={onContinue} className="btn-primary patient-touch px-8">设备通过，进行心理准备 <ArrowRight className="h-5 w-5" /></button></div>
+      <div className={`mt-5 rounded-2xl border p-4 text-sm ${realtimeStatus === "error" ? "border-red-100 bg-red-50 text-red-800" : "border-emerald-100 bg-emerald-50 text-emerald-800"}`}><Bike className="mr-2 inline h-5 w-5" />{realtimeMessage}</div>
+      <div className="mt-6 flex justify-between"><div className="flex gap-3"><button type="button" onClick={onBack} className="btn-secondary patient-touch"><ArrowLeft className="h-4 w-4" /> 返回处方</button><button type="button" onClick={onReset} className="btn-secondary patient-touch"><RotateCcw className="h-4 w-4" /> 重新检测</button></div><button type="button" disabled={!bike} onClick={onContinue} className="btn-primary patient-touch px-8">设备通过，进行心理准备 <ArrowRight className="h-5 w-5" /></button></div>
     </section>
   );
 }
@@ -954,7 +932,7 @@ function BpModeScreen({ mode, setMode, onBack, onStart }: { mode: BpMode | null;
 function TrainingScreen(props: {
   phase: Phase; setPhase: (value: Phase) => void; elapsed: number; paused: boolean; setPaused: (value: boolean) => void; bpMode: BpMode; measuredBp: string; measuredBpTime: string; onMeasureBp: () => void;
   targetHr: number; warmup: number; mainMinutes: number; cooldown: number; repeats: number; setElapsed: (value: number) => void; rpe: number; setRpe: (value: number) => void; anomaly: boolean; setAnomaly: (value: boolean) => void; onFinish: () => void;
-  liveMetric: BikeMetric | null; realtimeStatus: string; realtimeMessage: string;
+  liveMetric: DeviceMetric | null; realtimeStatus: string; realtimeMessage: string;
 }) {
   const { phase, setPhase, elapsed, paused, setPaused, bpMode, measuredBp, measuredBpTime, onMeasureBp, targetHr, warmup, mainMinutes, cooldown, repeats, setElapsed, rpe, setRpe, anomaly, setAnomaly, onFinish, liveMetric, realtimeStatus, realtimeMessage } = props;
   const hr = liveMetric?.heart_rate ?? 0;
@@ -1132,13 +1110,13 @@ function ResultScreen({
   bp: string;
   onDone: () => void;
   record?: ExerciseRecord;
-  metric: BikeMetric | null;
+  metric: DeviceMetric | null;
 }) {
   const [aiOpen, setAiOpen] = useState(false);
   return (
     <section className="grid h-full min-h-[610px] grid-cols-[0.8fr_1.2fr] gap-5" data-testid="page-VIEW-PATIENT-RESULT">
       <article className="flex flex-col items-center justify-center rounded-3xl bg-gradient-to-br from-[#123d54] to-[#1f7e79] p-8 text-center text-white shadow-xl"><span className="flex h-24 w-24 items-center justify-center rounded-full bg-white/15 ring-8 ring-white/5"><CheckCircle2 className="h-14 w-14" /></span><p className="mt-7 text-sm font-bold text-teal-100">第 {patient.completed + 1} 次训练</p><h1 className="mt-2 text-4xl font-bold">训练已完成</h1><p className="mt-3 max-w-sm text-sm leading-6 text-teal-50/75">本次训练记录已生成。</p><div className="mt-8 w-full space-y-3"><button type="button" onClick={() => setAiOpen((value) => !value)} className="patient-touch flex w-full items-center justify-center gap-2 rounded-2xl bg-white font-bold text-medical-900"><Sparkles className="h-5 w-5" /> AI 解读</button><button type="button" onClick={onDone} className="patient-touch flex w-full items-center justify-center gap-2 rounded-2xl bg-white/10 font-bold text-white ring-1 ring-white/25 hover:bg-white/15"><House className="h-5 w-5" /> 返回训练工作台</button></div></article>
-      <article className="rounded-3xl border border-white bg-white p-7 shadow-card"><div className="flex items-center justify-between"><div><p className="text-xs font-bold text-medical-600">单次训练报告</p><h2 className="mt-1 text-2xl font-bold text-slate-950">本次云端训练记录</h2><p className="mt-1 text-xs text-slate-500">{record?.record_id || metric?.record_id || "等待后端完成记录聚合"}</p></div><span className="rounded-full bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-700">{record ? "已写入云端" : "正在同步"}</span></div><div className="mt-6 grid grid-cols-3 gap-4">{[["时长", `${record?.duration_min ?? totalMinutes} 分`], ["平均心率", `${record?.avg_heart_rate ?? metric?.heart_rate ?? "—"} bpm`], ["最大心率", `${record?.max_heart_rate ?? "—"} bpm`], ["末次功率", `${metric?.power ?? "—"} W`], ["末次距离", metric?.distance === undefined ? "—" : `${(metric.distance / 1000).toFixed(2)} km`], ["总热量", `${record?.calories ?? metric?.calories ?? "—"} kcal`]].map(([label, value]) => <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4" key={label}><p className="text-xs font-bold text-slate-400">{label}</p><p className="mt-2 text-lg font-bold text-slate-900">{value}</p></div>)}</div><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-2xl border border-sky-100 bg-sky-50 p-4"><p className="text-xs font-bold text-sky-700">结束血压</p><p className="mt-2 text-lg font-bold text-slate-900">{bp} mmHg</p></div><div className="rounded-2xl border border-violet-100 bg-violet-50 p-4"><p className="text-xs font-bold text-violet-700">RPE</p><p className="mt-2 text-lg font-bold text-slate-900">{rpe} / 20</p></div></div>{aiOpen && <div className="mt-5 rounded-2xl border border-violet-100 bg-violet-50 p-5"><p className="flex items-center gap-2 font-bold text-violet-900"><Sparkles className="h-5 w-5" />AI 解读</p><p className="mt-2 text-sm leading-6 text-violet-900">AI 报告解读应由同事的报告管理后端生成并经医生确认；Pad 当前仅展示本次真实训练数据，不生成临床结论。</p></div>}</article>
+      <article className="rounded-3xl border border-white bg-white p-7 shadow-card"><div className="flex items-center justify-between"><div><p className="text-xs font-bold text-medical-600">单次训练报告</p><h2 className="mt-1 text-2xl font-bold text-slate-950">本次真实功率车记录</h2><p className="mt-1 text-xs text-slate-500">数据由车载设备接口实时采集</p></div><span className="rounded-full bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-700">本机已完成</span></div><div className="mt-6 grid grid-cols-3 gap-4">{[["时长", metric?.duration_seconds === undefined ? `${totalMinutes} 分` : formatTime(metric.duration_seconds)], ["当前心率", `${metric?.heart_rate || "—"} bpm`], ["末次踏频", `${metric?.cadence ?? "—"} rpm`], ["末次功率", `${metric?.power ?? "—"} W`], ["总距离", metric?.distance === undefined ? "—" : `${(metric.distance / 1000).toFixed(2)} km`], ["总热量", `${metric?.calories ?? "—"} kcal`]].map(([label, value]) => <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4" key={label}><p className="text-xs font-bold text-slate-400">{label}</p><p className="mt-2 text-lg font-bold text-slate-900">{value}</p></div>)}</div><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-2xl border border-sky-100 bg-sky-50 p-4"><p className="text-xs font-bold text-sky-700">结束血压</p><p className="mt-2 text-lg font-bold text-slate-900">{bp} mmHg</p></div><div className="rounded-2xl border border-violet-100 bg-violet-50 p-4"><p className="text-xs font-bold text-violet-700">RPE</p><p className="mt-2 text-lg font-bold text-slate-900">{rpe} / 20</p></div></div>{aiOpen && <div className="mt-5 rounded-2xl border border-violet-100 bg-violet-50 p-5"><p className="flex items-center gap-2 font-bold text-violet-900"><Sparkles className="h-5 w-5" />AI 解读</p><p className="mt-2 text-sm leading-6 text-violet-900">Pad 当前仅展示本次真实训练数据；临床解读仍需由医生确认。</p></div>}</article>
     </section>
   );
 }

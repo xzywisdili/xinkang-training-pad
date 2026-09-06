@@ -1,6 +1,6 @@
 # 心康伴侣训练端 Pad（Android）
 
-以新版 `xinkang-companion-rehab-closed-loop-demo-main` 的患者训练 UI 和闭环思路为产品基线，面向院内 Android Pad 独立交付。Pad 负责患者核验、处方核对、设备检查、训练监测、患者反馈和单次训练报告；医护 Web 继续负责患者建档、处方签署、异常复核和报告管理。
+以现有患者训练 UI 为产品外壳，复用 `mem-sports-rehabilitation-master` 中已经在目标功率车验证过的设备连接实现。当前实车验证版本不依赖功率车模拟器、模拟后端或患者云端校验，直接在车载 Android 9 平板上初始化功率车并读取真实运动数据。
 
 ## MacBook 浏览器调试
 
@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-打开 Vite 输出的本地地址即可调试绝大多数 UI、流程、Mock 数据和接口适配层。推荐 Chrome DevTools 的 iPad 横屏尺寸（1024 × 768）进行 UI 验收。
+打开 Vite 输出的本地地址可调试 UI 和流程。浏览器中不会加载厂商功率车 SDK，真实设备数据必须安装 APK 后在车载平板验证。
 
 ## 生成 Android 容器
 
@@ -23,44 +23,49 @@ npm run cap:open
 
 `cap:open` 会调用 Android Studio。Android Studio 中可使用 Android 模拟器或 USB 连接的 Android 平板运行；每次前端变更后执行 `npm run cap:sync` 再运行。
 
-Android Debug 构建还需要 Android Studio 自带的 JDK、Android SDK 与对应的 emulator/device。模拟器适合验证布局、登录、流程和接口；BLE 扫描、真实功率车/监测背包连接、后台采集与系统权限必须使用实体 Android 平板验证。
+Android Debug 构建还需要 Android Studio 自带的 JDK 和 Android SDK。模拟器只适合验证布局；厂商串口库只包含 ARM 架构，真实功率车连接必须使用车载实体平板验证。
+
+## Windows 构建 APK
+
+```powershell
+cd D:\Projects\MEM\xinkang-training-pad-android
+git pull
+npm install
+npm run build
+npx cap sync android
+
+$env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+cd android
+.\gradlew.bat assembleDebug
+```
+
+APK 产物：
+
+```text
+D:\Projects\MEM\xinkang-training-pad-android\android\app\build\outputs\apk\debug\app-debug.apk
+```
 
 ## 架构边界
 
-- React：页面、训练流程、表单、报告展示和 API 数据适配。
+- React：页面、训练流程和真实功率车指标展示。
 - Capacitor：将 Web 构建产物装入 Android 应用，并提供 JavaScript 与原生层通信桥。
-- Kotlin 原生插件：BLE 设备连接、采样、断连重连、原生 TTS/提示音、后台任务、设备时间同步和安全日志。
-- 后端接口：认证、患者/处方/视频读取、训练会话、指标批量上传、异常事件、报告与离线补传。
+- Kotlin 原生插件：初始化已验证的功率车 SDK，控制开始/暂停/继续/停止，并轮询真实指标。
+- 厂商设备层：JAR 与串口 `.so` 原样取自 `mem-sports-rehabilitation-master`，不自行猜测或重写协议。
 
-当前联调数据链：
-
-```text
-骑行功率车模拟器 (:3000)
-  → 功率车适配器 (:4000)
-  → FastAPI / 云 PostgreSQL (:8000)
-  → /ws/watch/{patient_user_id}
-  → Android Pad 实时训练界面
-```
-
-病案号使用患者短号，例如 `1006`；Pad 核验后转换为云库完整 `user_id`，例如 `10001_1006`。训练历史和单次报告读取同事后端的 `/api/exercises/{patient_user_id}` 与 `/api/exercises/{patient_user_id}/{record_id}`，与 Web 报告管理共用同一数据源。
-
-配置见 `.env.example`。开发服务器默认使用 `http://123.57.205.29:8000`；生产必须改为 HTTPS/WSS，并由后端提供 Pad/患者专用鉴权。
-
-`src/native/trainingDevice.ts` 已定义 React 侧设备桥接契约；接入设备时保持该接口不变，再在 Android 工程实现同名 Capacitor Kotlin Plugin。
-
-## 病例号 / 病案号 OCR 接入
-
-将 `.env.example` 复制为 `.env.local`，填写院内 OCR 服务地址。拍照扫描会上传图片至：
+当前实车数据链：
 
 ```text
-POST {VITE_OCR_API_BASE_URL}/ocr/medical-record
-Content-Type: multipart/form-data
-字段：image
+功率车控制板
+  → 车载 Android 平板串口
+  → mem-sports 已验证的功率车 SDK
+  → TrainingDevicePlugin
+  → React 训练界面
 ```
 
-服务应返回 `caseNumber` 或 `medicalRecordNumber`（可选 `confidence`）。建议在院内部署 PaddleOCR 服务，仅提取并返回病例号/病案号；Pad 页面始终要求护士人工核对识别结果后才能继续。
+实时字段包括运动时间、距离、热量、心率、速度、踏频、功率和阻力档位。SDK 与原厂应用可能独占同一个串口，实车测试前应完全退出原厂功率车应用。
 
 ## 当前状态
 
-患者核验、功率车实时数据、训练历史和单次训练报告已对接共用 FastAPI/云库。真实 BLE 功率车和监测背包仍需在 Android 原生插件中实现。当前后端尚未给 Pad 开放患者鉴权及已签处方读取权限，因此处方缺失时界面只允许作为设备联调状态使用，不应作为正式临床训练依据。
+版本 `1.1-real-bike` 已完成真实功率车 SDK、原生桥接和 UI 数据映射。Web 构建及 Capacitor 同步已验证；最终 Android 原生编译与数据准确性需在 Windows 和目标车载平板验证。当前版本用于实车技术联调，不作为无人值守的临床控制软件。
 # xinkang-training-pad
