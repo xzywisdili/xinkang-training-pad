@@ -67,6 +67,11 @@ class TrainingDevicePlugin : Plugin() {
         mainHandler.removeCallbacks(metricPoller)
     }
 
+    private fun reject(call: PluginCall, message: String, error: Throwable) {
+        val exception = error as? Exception ?: Exception(error)
+        call.reject("$message：${error.message ?: "未知错误"}", exception)
+    }
+
     @PluginMethod
     fun connect(call: PluginCall) {
         if (call.getString("device") != "bike") {
@@ -82,7 +87,7 @@ class TrainingDevicePlugin : Plugin() {
                 put("serialPath", bike.serialPath)
                 put("sdkVersion", bike.sdkVersion)
             }
-        }.onSuccess(call::resolve).onFailure { call.reject("功率车初始化失败：${it.message}", it) }
+        }.onSuccess(call::resolve).onFailure { reject(call, "功率车初始化失败", it) }
     }
 
     @PluginMethod
@@ -99,28 +104,28 @@ class TrainingDevicePlugin : Plugin() {
             startPolling()
             val result = bike.controlBikeRun()
             JSObject().put("status", "started").put("resultCode", result)
-        }.onSuccess(call::resolve).onFailure { call.reject("启动功率车失败：${it.message}", it) }
+        }.onSuccess(call::resolve).onFailure { reject(call, "启动功率车失败", it) }
     }
 
     @PluginMethod
     fun pauseSession(call: PluginCall) {
         runCatching { bike.controlBikePause() }
             .onSuccess { call.resolve(JSObject().put("status", "paused").put("resultCode", it)) }
-            .onFailure { call.reject("暂停功率车失败：${it.message}", it) }
+            .onFailure { reject(call, "暂停功率车失败", it) }
     }
 
     @PluginMethod
     fun resumeSession(call: PluginCall) {
         runCatching { bike.controlBikeRun() }
             .onSuccess { call.resolve(JSObject().put("status", "started").put("resultCode", it)) }
-            .onFailure { call.reject("继续功率车失败：${it.message}", it) }
+            .onFailure { reject(call, "继续功率车失败", it) }
     }
 
     @PluginMethod
     fun stopSession(call: PluginCall) {
         runCatching { bike.controlBikeStop() }
             .onSuccess { call.resolve(JSObject().put("status", "stopped").put("resultCode", it)) }
-            .onFailure { call.reject("停止功率车失败：${it.message}", it) }
+            .onFailure { reject(call, "停止功率车失败", it) }
     }
 
     override fun handleOnDestroy() {
